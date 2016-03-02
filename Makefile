@@ -1,3 +1,2 @@
-utz: 
-	gcc -Wall utz.c -lasound -o utz
-
+utz: utz.c
+	$(CC) -Wall utz.c -lasound -o $@
