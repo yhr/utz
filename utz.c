@@ -131,6 +131,25 @@ void print_usage() {
 	fprintf(stderr, "-i, --input             set MIDI input device [%s]\n", midi_input);
 }
 
+void list_devices() {
+	char **hints;
+	char ** n;
+	int err = snd_device_name_hint(-1, "pcm", (void***)&hints);
+	if (err != 0)
+		return;
+	n = hints;
+	printf("Available PCM devices: \n");
+	while (*n != NULL) {
+		char *name = snd_device_name_get_hint(*n, "NAME");
+		if (name != NULL && 0 != strcmp("null", name)) {
+			printf("    %s \n", name);
+			free(name);
+		}
+		n++;
+	}
+	snd_device_name_free_hint((void**)hints);
+}
+
 int parse_cmdargs(int argv, char *argc[]) {
 	int i=1;
 	/* parse otions */
@@ -139,7 +158,7 @@ int parse_cmdargs(int argv, char *argc[]) {
 		int option_identified = 0;
 		if (strcmp(argc[i], "-l") == 0 ||
 		    strcmp(argc[i], "--list-devices") == 0) {
-			/* TODO: actually list devices */
+			list_devices();
 			return -1;
 		}
 
