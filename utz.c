@@ -118,6 +118,72 @@ void stupidsort(long *array, long elements) {
 	}
 }
 
+
+char *audio_output = "default";
+char *midi_input = "hw:1,0,0";
+char *wav_filename = NULL;
+
+void print_usage() {
+	fprintf(stderr, "usage: utz [option(s)] samplefile(.wav)\n");
+	fprintf(stderr, "supported options [defaults in brackets]:\n");
+	fprintf(stderr, "-l, --list-devices      list available audio output devices\n");
+	fprintf(stderr, "-o, --output            set output audio device [%s]\n", audio_output);
+	fprintf(stderr, "-i, --input             set MIDI input device [%s]\n", midi_input);
+}
+
+int parse_cmdargs(int argv, char *argc[]) {
+	int i=1;
+	/* parse otions */
+
+	while (i < argv) {
+		int option_identified = 0;
+		if (strcmp(argc[i], "-l") == 0 ||
+		    strcmp(argc[i], "--list-devices") == 0) {
+			/* TODO: actually list devices */
+			return -1;
+		}
+
+		if (strcmp(argc[i], "-o") == 0 ||
+		    strcmp(argc[i], "--output") == 0) {
+			if (i < argv-1) {
+				i++;
+				audio_output = argc[i++];
+			} else {
+				fprintf(stderr, "output device not specified\n");
+				return -1;
+			}
+			option_identified = 1;
+		}
+
+		if (strcmp(argc[i], "-i") == 0 ||
+		    strcmp(argc[i], "--input") == 0) {
+			if (i < argv-1) {
+				i++;
+				midi_input = argc[i++];
+			} else {
+				fprintf(stderr, "MIDI input device not specified\n");
+				return -1;
+			}
+			option_identified = 1;
+		}
+
+		if (!option_identified) {
+			if (i == argv-1) {
+				/* last option -> wav sample name, we're done here */
+				wav_filename = argc[i];
+				return 0;
+			} else {
+				fprintf(stderr, "unknown option: %s\n", argc[i]);
+				return -1;
+			}
+		}
+	}
+
+	fprintf(stderr, "No wav specified!\n");
+	print_usage();
+	return -1;
+}
+
 int main(int argv, char *argc[])
 {
 	snd_rawmidi_t *MIDI_in = NULL;
@@ -126,10 +192,12 @@ int main(int argv, char *argc[])
 	int tapIndex=0;
 	int enoughTaps=0;
 
+	if (parse_cmdargs(argv, argc)) {
+		return -1;
+	}
 	signal(SIGINT,sighandler);	
 
-	/* open default MIDI device, TODO: add command line parameter for this */
-	ret = snd_rawmidi_open(&MIDI_in, NULL, "hw:1,0,0", 0); 
+	ret = snd_rawmidi_open(&MIDI_in, NULL, midi_input, 0);
 	if (ret) {
 		printf("ERROR: could not open MIDI input device.\n");
 		goto cleanup;
