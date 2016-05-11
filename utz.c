@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 #define BPM_MEASUREPOINTS  16
 
@@ -222,7 +223,7 @@ snd_pcm_t *init_sound(char *pcm_name, int rate, int channels)
 				     channels,
 				     rate,
 				     1,  /*soft resample allowed*/
-                                     20 /*20ms latency*/);
+                                     40 /*20ms latency*/);
 	if (ret < 0) {
 
 		fprintf(stderr, "Can't set PCM parameters: %s\n",
@@ -233,23 +234,10 @@ snd_pcm_t *init_sound(char *pcm_name, int rate, int channels)
 	return pcm_handle;
 }
 
-int play_sound(snd_pcm_t *pcm_handle, char *wav_filename)
-{
-	snd_pcm_uframes_t buffer_size;
-	snd_pcm_uframes_t period_size;
-	int ret;
+int read_wav(char* wav_filename, char **buffer, long *buffer_size) {
+	long sz;
 	int wav_fd;
-	char *buffer;
-	int bytesread = 0;
-	int readbuffer_size;
-
-	ret = snd_pcm_get_params(pcm_handle, &buffer_size, &period_size);
-	if (ret < 0) {
-		fprintf(stderr, "Could not get pcm parameters: %s \n",
-			snd_strerror(ret));
-		return -1;
-	}
-	/*printf("Buffer size: %ld, Period size: %ld \n", buffer_size, period_size);*/
+	struct stat st;
 
 	/* TODO: add real wav file reading */
 	wav_fd = open(wav_filename, O_RDONLY);
@@ -257,37 +245,64 @@ int play_sound(snd_pcm_t *pcm_handle, char *wav_filename)
 		fprintf(stderr, "could not open wav file\n");
 		return -1;
 	}
-	lseek(wav_fd, 44, SEEK_SET);
 
-	readbuffer_size = period_size*2*2;
-	buffer = malloc(readbuffer_size);
-	if(NULL == buffer) {
+	stat(wav_filename, &st);
+	sz = st.st_size;
+
+	lseek(wav_fd, 44, SEEK_SET);
+	*buffer_size = (sz-44);
+	*buffer = malloc(*buffer_size);
+	if(NULL == *buffer) {
 		fprintf(stderr, "Could not allocate play buffer\n");
 		return -1;
 	}
-
-	while( (bytesread = read(wav_fd, buffer, readbuffer_size)) != 0 ) {
-
-		/* zero the last bytes of the buffer if we're at the end of the file */
-		if (bytesread < readbuffer_size)
-			memset(&buffer[bytesread], readbuffer_size-bytesread, 0);
-
-		ret = snd_pcm_writei(pcm_handle, buffer, period_size);
-		if (ret == -EPIPE) {
-			/*fprintf(stderr, "XRUN\n");*/
-			snd_pcm_prepare(pcm_handle);
-		}
-	}
-
+	read(wav_fd, *buffer, *buffer_size);
 	close(wav_fd);
-	free(buffer);
 	return 0;
 }
+
+int play_sound(snd_pcm_t *pcm_handle, char *wav_buffer, long wav_buffer_size)
+{
+	snd_pcm_uframes_t buffer_size;
+	snd_pcm_uframes_t period_size;
+	int ret;
+	long bytesplayed = 0;
+
+	ret = snd_pcm_get_params(pcm_handle, &buffer_size, &period_size);
+	if (ret < 0) {
+		fprintf(stderr, "Could not get pcm parameters: %s \n",
+			snd_strerror(ret));
+		return -1;
+	}
+
+	/* the playback is iffy. todo: read the documentation */
+	/* properly. */
+
+	snd_pcm_prepare(pcm_handle);
+	while( bytesplayed < wav_buffer_size) {
+
+		/* zero the last bytes of the buffer if we're at the end of the file */
+		/*if (bytesread < readbuffer_size)
+			memset(&buffer[bytesread], readbuffer_size-bytesread, 0);*/
+
+		ret = snd_pcm_writei(pcm_handle, (wav_buffer+bytesplayed), period_size);
+		if (ret == -EPIPE) {
+			fprintf(stderr, "XRUN\n");
+			snd_pcm_prepare(pcm_handle);
+		}
+		bytesplayed += period_size*2*2;
+	}
+
+	return 0;
+}
+
 
 pthread_mutex_t play_time_lock;
 long beat_period_ms=0;
 
 struct timespec play_time;
+char *wav_buffer;
+long wav_buffer_size;
 
 void* playsound_thread(void *arg) {
 	snd_pcm_t *pcm_handle = arg;
@@ -310,7 +325,7 @@ void* playsound_thread(void *arg) {
 			}
 
 			pthread_mutex_unlock(&play_time_lock);
-			play_sound(pcm_handle, wav_filename);
+			play_sound(pcm_handle, wav_buffer, wav_buffer_size);
 		} else
 			pthread_mutex_unlock(&play_time_lock);	
 	};
@@ -327,7 +342,6 @@ int main(int argv, char *argc[])
 	snd_pcm_t *pcm_handle;
 	pthread_t playthread_id;
 
-
 	play_time.tv_sec = 0;
 
 	if (parse_cmdargs(argv, argc)) {
@@ -336,6 +350,9 @@ int main(int argv, char *argc[])
 
 	pcm_handle = init_sound(audio_output, 44100, 2);
 	if (NULL == pcm_handle)
+		return -1;
+
+	if(-1 == read_wav(wav_filename, &wav_buffer, &wav_buffer_size))
 		return -1;
 
 	signal(SIGINT,sighandler);
@@ -426,6 +443,7 @@ int main(int argv, char *argc[])
 	}
 	 	
 cleanup:
+	free(wav_buffer);
 	snd_pcm_close(pcm_handle);
 	if (MIDI_in)
 		snd_rawmidi_close(MIDI_in);
