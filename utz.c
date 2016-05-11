@@ -33,7 +33,7 @@ int print_info(snd_rawmidi_t *MIDI_in)
 	if (ret) 
 		return ret;
 		
-	ret = snd_rawmidi_info(MIDI_ingit , MIDI_info);
+	ret = snd_rawmidi_info(MIDI_in , MIDI_info);
 	if (ret)
 		return ret;
 
@@ -222,7 +222,7 @@ snd_pcm_t *init_sound(char *pcm_name, int rate, int channels)
 				     channels,
 				     rate,
 				     1,  /*soft resample allowed*/
-                                     5 /*20ms latency*/);
+                                     20 /*20ms latency*/);
 	if (ret < 0) {
 
 		fprintf(stderr, "Can't set PCM parameters: %s\n",
@@ -323,7 +323,7 @@ int main(int argv, char *argc[])
 	int ret=-1;
 	struct timespec taps[BPM_MEASUREPOINTS];
 	int tapIndex=0;
-	int enoughTaps=0;
+	int enoughTaps=0, goodtaps=0;
 	snd_pcm_t *pcm_handle;
 	pthread_t playthread_id;
 
@@ -410,7 +410,7 @@ int main(int argv, char *argc[])
 					}
 				}
 				if(goodTaps > 9) {
-					beat_period_ms = deltasum_ms / goodTaps; else
+					beat_period_ms = deltasum_ms / goodTaps;
 				} else {
 					beat_period_ms = 0;
 				}
