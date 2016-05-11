@@ -14,6 +14,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <time.h>
+#include <pthread.h>
 
 #define BPM_MEASUREPOINTS  16
 
@@ -32,7 +33,7 @@ int print_info(snd_rawmidi_t *MIDI_in)
 	if (ret) 
 		return ret;
 		
-	ret = snd_rawmidi_info(MIDI_in, MIDI_info);
+	ret = snd_rawmidi_info(MIDI_ingit , MIDI_info);
 	if (ret)
 		return ret;
 
@@ -128,7 +129,7 @@ void print_usage() {
 	fprintf(stderr, "supported options [defaults in brackets]:\n");
 	fprintf(stderr, "-l, --list-devices      list available audio output devices\n");
 	fprintf(stderr, "-o, --output            set output audio device [%s]\n", audio_output);
-	fprintf(stderr, "-i, --input             set MIDI input device [%s]\n", midi_input);
+	fprintf(stderr, "-i, --input             set MIDI input device(tip: use amidi -l to list available devs)\n");
 }
 
 void list_devices() {
@@ -153,7 +154,6 @@ void list_devices() {
 int parse_cmdargs(int argv, char *argc[]) {
 	int i=1;
 	/* parse otions */
-
 	while (i < argv) {
 		int option_identified = 0;
 		if (strcmp(argc[i], "-l") == 0 ||
@@ -203,6 +203,120 @@ int parse_cmdargs(int argv, char *argc[]) {
 	return -1;
 }
 
+snd_pcm_t *init_sound(char *pcm_name, int rate, int channels)
+{
+	snd_pcm_t *pcm_handle = NULL;
+	int ret;
+
+	ret = snd_pcm_open(&pcm_handle, pcm_name,
+				SND_PCM_STREAM_PLAYBACK, 0);
+	if (ret < 0) {
+		fprintf(stderr, "Can't open \"%s\" PCM device. %s\n",
+					pcm_name, snd_strerror(ret));
+		return NULL;
+	}
+
+	ret = snd_pcm_set_params(pcm_handle,
+				     SND_PCM_FORMAT_S16_LE,
+				     SND_PCM_ACCESS_RW_INTERLEAVED,
+				     channels,
+				     rate,
+				     1,  /*soft resample allowed*/
+                                     5 /*20ms latency*/);
+	if (ret < 0) {
+
+		fprintf(stderr, "Can't set PCM parameters: %s\n",
+					snd_strerror(ret));
+		return NULL;
+	}
+
+	return pcm_handle;
+}
+
+int play_sound(snd_pcm_t *pcm_handle, char *wav_filename)
+{
+	snd_pcm_uframes_t buffer_size;
+	snd_pcm_uframes_t period_size;
+	int ret;
+	int wav_fd;
+	char *buffer;
+	int bytesread = 0;
+	int readbuffer_size;
+
+	ret = snd_pcm_get_params(pcm_handle, &buffer_size, &period_size);
+	if (ret < 0) {
+		fprintf(stderr, "Could not get pcm parameters: %s \n",
+			snd_strerror(ret));
+		return -1;
+	}
+	/*printf("Buffer size: %ld, Period size: %ld \n", buffer_size, period_size);*/
+
+	/* TODO: add real wav file reading */
+	wav_fd = open(wav_filename, O_RDONLY);
+	if(-1 == wav_fd) {
+		fprintf(stderr, "could not open wav file\n");
+		return -1;
+	}
+	lseek(wav_fd, 44, SEEK_SET);
+
+	readbuffer_size = period_size*2*2;
+	buffer = malloc(readbuffer_size);
+	if(NULL == buffer) {
+		fprintf(stderr, "Could not allocate play buffer\n");
+		return -1;
+	}
+
+	while( (bytesread = read(wav_fd, buffer, readbuffer_size)) != 0 ) {
+
+		/* zero the last bytes of the buffer if we're at the end of the file */
+		if (bytesread < readbuffer_size)
+			memset(&buffer[bytesread], readbuffer_size-bytesread, 0);
+
+		ret = snd_pcm_writei(pcm_handle, buffer, period_size);
+		if (ret == -EPIPE) {
+			/*fprintf(stderr, "XRUN\n");*/
+			snd_pcm_prepare(pcm_handle);
+		}
+	}
+
+	close(wav_fd);
+	free(buffer);
+	return 0;
+}
+
+pthread_mutex_t play_time_lock;
+long beat_period_ms=0;
+
+struct timespec play_time;
+
+void* playsound_thread(void *arg) {
+	snd_pcm_t *pcm_handle = arg;
+	struct timespec current_time;
+
+	while(!stop) {
+		pthread_mutex_lock(&play_time_lock);
+		clock_gettime(CLOCK_REALTIME, &current_time);
+		if( play_time.tv_sec != 0 &&
+		     (current_time.tv_sec > play_time.tv_sec ||
+	              (current_time.tv_sec == play_time.tv_sec &&
+                       current_time.tv_nsec > play_time.tv_nsec))) {
+
+			if(beat_period_ms == 0) {
+				play_time.tv_sec = 0;
+			} else {
+				play_time.tv_sec = (current_time.tv_sec + beat_period_ms/1000);
+				play_time.tv_nsec = (current_time.tv_nsec + beat_period_ms*1000*1000) % (1000000000);
+				play_time.tv_sec += (current_time.tv_nsec + beat_period_ms*1000*1000) / (1000000000);
+			}
+
+			pthread_mutex_unlock(&play_time_lock);
+			play_sound(pcm_handle, wav_filename);
+		} else
+			pthread_mutex_unlock(&play_time_lock);	
+	};
+	return NULL;
+}
+
 int main(int argv, char *argc[])
 {
 	snd_rawmidi_t *MIDI_in = NULL;
@@ -210,18 +324,29 @@ int main(int argv, char *argc[])
 	struct timespec taps[BPM_MEASUREPOINTS];
 	int tapIndex=0;
 	int enoughTaps=0;
+	snd_pcm_t *pcm_handle;
+	pthread_t playthread_id;
+
+
+	play_time.tv_sec = 0;
 
 	if (parse_cmdargs(argv, argc)) {
 		return -1;
 	}
-	signal(SIGINT,sighandler);	
+
+	pcm_handle = init_sound(audio_output, 44100, 2);
+	if (NULL == pcm_handle)
+		return -1;
+
+	signal(SIGINT,sighandler);
+
+	playthread_id = pthread_create(&playthread_id, NULL, &playsound_thread, pcm_handle);	
 
 	ret = snd_rawmidi_open(&MIDI_in, NULL, midi_input, 0);
 	if (ret) {
 		printf("ERROR: could not open MIDI input device.\n");
 		goto cleanup;
 	}
-
 
 	ret = print_info(MIDI_in); 
 	if (ret) {
@@ -230,8 +355,8 @@ int main(int argv, char *argc[])
 	}
 
 	printf("Press CTRL-C to exit\n");
-
 	while(!stop) {
+
 		ret = getMIDImessage(MIDI_in);
 		if (ret < 0)
 			stop = 1;
@@ -240,15 +365,19 @@ int main(int argv, char *argc[])
 			printf("Non-note message recieved. Status: %d\n", ret);
 
 		if (ret == NOTE_ON) {
-			printf("UTZ..\n");
-	
+
 			clock_gettime(CLOCK_REALTIME, &taps[tapIndex++]);
+
+			pthread_mutex_lock(&play_time_lock);
+			clock_gettime(CLOCK_REALTIME, &play_time);
+			pthread_mutex_unlock(&play_time_lock);
+
 			if (tapIndex == BPM_MEASUREPOINTS) {
 				enoughTaps = 1;
 				tapIndex = 0;
 			}
-				
-			if (enoughTaps) {
+
+			if (enoughTaps && goodtaps < 10) {
 				long delta_ms[BPM_MEASUREPOINTS];
 				long deltasum_ms=0;
 				int i = tapIndex;
@@ -280,6 +409,14 @@ int main(int argv, char *argc[])
 						goodTaps++;
 					}
 				}
+				if(goodTaps > 9) {
+					beat_period_ms = deltasum_ms / goodTaps; else
+				} else {
+					beat_period_ms = 0;
+				}
+
+				if (beat_period_ms != 0)
+					printf("\nbeat interval (ms) %ld \n", beat_period_ms);
 
 				kBPM = goodTaps*60000*1000 / deltasum_ms;
 				printf("BPM2: %ld.%ld \n", kBPM / 1000, kBPM % 1000);
@@ -289,6 +426,7 @@ int main(int argv, char *argc[])
 	}
 	 	
 cleanup:
+	snd_pcm_close(pcm_handle);
 	if (MIDI_in)
 		snd_rawmidi_close(MIDI_in);
 	return ret;
